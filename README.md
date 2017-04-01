@@ -29,7 +29,7 @@ It will also respond for hostname.bind, version.bind and author.bind TXT in CHAO
 
 ## MemCache
 
-At the moment, it's hard coded to use memcache on the local server on the default port - this will get pulled out into a config file item, but network latency *could* result in a race condition between the NS sticking the source IP in memcache and the PHP looking in memcache for the entry a split second later.
+If you have memcache, it'll store details in there for the find-my-ip-webpage to use.
 
 ## DNSSEC
 
