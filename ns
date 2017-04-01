@@ -1,0 +1,443 @@
+#!/opt/local/bin/perl5.24
+
+#
+# A nameserver that returns TXT records containing the IP of the source making the query
+#  as well as the EDNS size, and, if presented, the EDNS CLIENT-SUBNET
+#
+# Works in conjunction with the "What's My IP?" webpage, which can then display your resolver's IP
+#
+# Author: Karl Dyson, hackery@perlbitch.com
+#
+
+$|++;
+
+use strict;
+
+use Net::DNS::Nameserver;
+use Net::DNS;
+use JSON;
+
+my $stats;
+$stats->{start} = time();
+$stats->{proto}->{udp} = 0;
+$stats->{proto}->{tcp} = 0;
+$stats->{total} = 0;
+$stats->{lastTotal} = 0;
+
+spew("STARTUP", "Started: $stats->{start}");
+spew("STARTUP", "Net::DNS ....... :: ".Net::DNS->VERSION);
+
+my $hasSecExtension = 0;
+if(require Net::DNS::SEC) {
+	spew("STARTUP", "Net::DNS::SEC .. :: ".Net::DNS::SEC->VERSION);
+	$hasSecExtension = 1;
+}
+
+##
+## CONFIG BEGINS ##
+##
+
+my $configFile = shift || '/usr/local/etc/ns.conf';
+my $config;
+local $/;
+if(open(C, $configFile)) {
+        my $json = <C>;
+        close C;
+        $config = decode_json($json);
+} else {
+	die "cannot open config file: $!\n";
+}
+spew("STARTUP", "configFile ..... :: $configFile");
+
+my $debug = $config->{debug} || 0;
+my $logFile = $config->{logFile} || '/var/log/ns.log';
+my $localAddr = $config->{localAddr} || '::';
+my $localPort = $config->{localPort} || 53;
+my $ksk = $config->{ksk};
+my $domain = $config->{domain} || die "No domain supplied in config file\n";
+my $rrA = $config->{rrA};
+my $rrAAAA = $config->{rrAAAA};
+die "You need at least one of rrA or rrAAAA set\n" unless $rrA or $rrAAAA;
+my @rrNS;
+if(defined($config->{rrNS})) {
+	@rrNS = @{$config->{rrNS}};
+} else {
+	@rrNS = (
+		{
+			'name' => "ns.$domain",
+			'A' => $rrA,
+			'AAAA' => $rrAAAA,
+		},
+	);
+}
+my $ttlStatic = $config->{ttlStatic} || 30;
+my $ttlDynamic = $config->{ttlDynamic} || 5;
+my $rrDNSKEY = $config->{rrDNSKEY};
+my $mname = $config->{mname} || $rrNS[0]->{name};
+my $rname = $config->{rname} || "hostmaster.$domain";
+my $ttlSoaMin = $config->{ttlSoaMin} || $ttlStatic;
+my $memcacheServer = $config->{memcacheServer} || '127.0.0.1';
+my $memcachePort = $config->{memcachePort} || 11211;
+my $chBindHostname = $config->{hostname.bind} || "These aren't the droids you're looking for... Move along...";
+my $chBindVersion = $config->{version.bind} || "Uh, hang on, I'm sure I had that around here somewhere...";
+## CONFIG ENDS ##
+
+$SIG{USR1} = sub { spew("STATS", doStats()); };
+
+my $memcache;
+if(require Cache::Memcached) {
+	spew("STARTUP", "Cache::Memcached :: ".Cache::Memcached->VERSION);
+	unless($memcache = new Cache::Memcached { 'servers' => ["$memcacheServer:$memcachePort"] }) {
+		$memcache = undef;
+	}
+}
+
+spew("STARTUP", "DEBUG .......... :: $debug");
+spew("STARTUP", "memcacheServer . :: $memcacheServer");
+spew("STARTUP", "memcachePort ... :: $memcachePort");
+spew("STARTUP", "localAddr ...... :: $localAddr");
+spew("STARTUP", "localPort ...... :: $localPort");
+spew("STARTUP", "logFile ........ :: $logFile");
+spew("STARTUP", "Domain ......... :: $domain");
+spew("STARTUP", "A .............. :: $rrA");
+spew("STARTUP", "AAAA ........... :: $rrAAAA");
+spew("STARTUP", "TTL Static ..... :: $ttlStatic");
+spew("STARTUP", "TTL Dynamic .... :: $ttlDynamic");
+spew("STARTUP", "SOA MNAME ...... :: $mname");
+spew("STARTUP", "SOA RNAME ...... :: $rname");
+spew("STARTUP", "SOA MIN ........ :: $ttlSoaMin");
+
+my $canSign = ($ksk && $rrDNSKEY && $hasSecExtension) ? 1 : 0;
+spew("STARTUP", "DNSSEC ......... :: ".($canSign ? "YES" : "NO"));
+
+my $canEdns = Net::DNS->VERSION > 0.79 ? 1 : 0;
+spew("STARTUP", "EDNS ........... :: ".($canEdns ? "YES" : "NO"));
+
+my($domainParent) = ($domain =~ m/^[^\.]+\.(.*)$/);
+spew("STARTUP", "---");
+spew("STARTUP", "You need to delegate $domain to the following nameservers in the $domainParent zonefile");
+spew("STARTUP", "Glue is presented for convenience, but requirement is left as an exercise for the reader.");
+
+spew("STARTUP", "---");
+my $rrNS;
+for my $ns (@rrNS) {
+	$rrNS->{lc($ns->{name})} = $ns;
+	spew("STARTUP", "$domain.\tIN\tNS\t$ns->{name}.");
+	for(qw/A AAAA/) {
+		spew("STARTUP", "$ns->{name}.\tIN\t$_\t$ns->{$_}") if $ns->{$_};
+	}
+}
+spew("STARTUP", "---");
+spew("WARNING", "Only ONE NS is set") if @rrNS == 1;
+
+if($canSign && $rrDNSKEY) {
+	my $rrDS = create Net::DNS::RR::DS(new Net::DNS::RR("$domain DNSKEY $rrDNSKEY"), 'digtype' => 'SHA256');
+	spew("STARTUP", "You need to add the following DS in the $domainParent zonefile");
+	spew("STARTUP", "---");
+	spew("STARTUP", "$domain.\tIN\tDS\t".$rrDS->keytag." ".$rrDS->algorithm." ".$rrDS->digtype." ".$rrDS->digest);
+	spew("STARTUP", "---");
+}
+
+my $ns = Net::DNS::Nameserver->new(
+	LocalAddr => $localAddr,
+	LocalPort => $localPort,
+	ReplyHandler => \&responseHandler,
+	Verbose => 0,
+) || die "cannot create nameserver object: $!\n";
+
+spew("STARTUP", "Complete. Commencing main loop...");
+
+my $loop = 0;
+while(1) {
+	$loop++;
+	spew("LOOP", "Loop $loop BEGIN") if $debug > 1;
+	eval {
+		$ns->loop_once(5);
+		while($ns->get_open_tcp()) {
+			$ns->loop_once(0);
+		}
+	};
+	if($@) {
+		chomp(my $err = $@);
+		spew("ERROR", $err);
+	}
+
+	if($loop % 120 == 0 && $stats->{total} > $stats->{lastTotal}) {
+		spew("STATS", doStats());
+		$stats->{lastTotal} = $stats->{total};
+	}
+	spew("LOOP", "Loop $loop END") if $debug > 1;
+}
+
+# returns the SOA with current UNIXTIME serial
+sub rrSOA {
+	return "$mname. $rname. ".time()." 14400 900 2419200 $ttlSoaMin";
+}
+
+# chucks out the current stats
+sub doStats {
+  my $ret = "Startup: $stats->{start} (".localtime($stats->{start})."); Uptime: ".commify((time() - $stats->{start}))."; ";
+  $ret .= "Connections: Total:$stats->{total}; TCP:$stats->{proto}->{tcp}; UDP:$stats->{proto}->{udp}";
+  return $ret;
+}
+
+# spews stuff to the screen and logfile for debugging etc.
+sub spew {
+	my $stage = shift;
+	my $message = shift;
+	my $line = localtime." :: $stage :: $message\n";
+	print $line;
+	##
+	## Keep opening and closing the log is expensive, and probably doesn't deal with
+	## the inevitable race of multiple connections being dealt with concurrently.
+	## this should be syslog, really, and simply include the source IP and port in the
+	## log lines for traceability
+	##
+	if($logFile) {
+		open(L, ">>$logFile") || die localtime." :: FATAL :: cannot open log $logFile: $!\n";
+		print L $line;
+		close L;
+	}
+}
+
+# puts commas in the right place in numbers. Oooo. Pretty.
+sub commify($;$$) {
+	my $text = reverse shift;
+	my $pos = shift || 3;
+	my $string = shift || ',';
+	$text =~ s/(\d{$pos})(?=\d)(?!\d*\.)/$1$string/g;
+	return scalar reverse $text;
+}
+
+# makes an ipv6 address human readable (hah) from CLIENT-SUBNET
+sub colonify {
+  my $text = shift;
+  $text =~ s/([\da-f]{4})(?=[\da-f])(?![\da-f]*\.)/$1:/g;
+  $text =~ s/:0000//g;
+  $text =~ s/:0+/:/g;
+  return $text;
+}
+
+# the actual response handler
+sub responseHandler {
+	my $qnameOriginal = shift;
+	my $qname = lc($qnameOriginal);
+	my $qclass = shift;
+	my $qtype = shift;
+	my $peerIp = shift;
+	my $query = shift;
+	my $sock = shift;
+
+	$peerIp =~ s/^::ffff://;
+
+	my $proto = scalar(keys %{$ns->{_tcp}}) > 0 ? 'tcp' : 'udp';
+
+	$query->print if $debug > 1;
+
+	my $clientSubnet;
+	my $ednsSize;
+	if($canEdns) {
+		spew("EDNS", $query->edns->print) if $debug > 1;
+		my $unpackedClientSubnet = unpack "H*", $query->edns->option('CLIENT-SUBNET');
+		my($options, $address) = ($unpackedClientSubnet =~ m/^([a-f\d]{8})([a-f\d]+)$/);
+		my @options = split //, $options;
+		my $family = sprintf "%d", hex("0x$options[2]$options[3]");
+		my $sourceLength = sprintf "%d", hex("0x$options[4]$options[5]");
+		my $scopeLength = sprintf "%d", hex("0x$options[6]$options[7]");
+		if($family == 1) {
+    	my @address = ($address =~ m/^([a-f\d]{2})([a-f\d]{2})?([a-f\d]{2})?([a-f\d]{2})?$/);
+      for my $i (0..$#address) {
+        $address[$i] = sprintf "%d", hex("0x$address[$i]");
+      }
+      $clientSubnet = join(".", @address)."/$sourceLength/$scopeLength";
+    }
+    elsif($family == 2) {
+      $clientSubnet = colonify($address)."::/$sourceLength/$scopeLength";
+    }
+
+		$ednsSize = $query->edns->size;
+	}
+
+## START BUILDING RESPONSE ##
+
+	my $response = {
+		'answer' => [],
+		'authority' => [],
+		'additional' => [],
+		'rcode' => 'SERVFAIL',
+		'header' => {
+			'aa' => 0,
+			'tc' => 0,
+		},
+	};
+
+	spew("QUERY", "$proto :: $peerIp :: $qclass/$qnameOriginal/$qtype") if $debug;
+
+	if($qtype eq 'AXFR' || $qtype eq 'IXFR') {
+		spew("DEBUG", "REFUSING $qtype") if $debug;
+		$response->{rcode} = 'REFUSED';
+	}
+	elsif($qtype eq 'ANY' && $proto eq 'udp') {
+		spew("DEBUG", "Query matched ANY via UDP") if $debug;
+		$response->{rcode} = 'NOERROR';
+		$response->{header}->{tc} = 1;
+	}
+	elsif($qtype eq 'ANY') {
+		spew("DEBUG", "Query matched ANY via TCP") if $debug;
+		$response->{rcode} = 'REFUSED';
+		push @{$response->{authority}}, Net::DNS::RR->new("$qnameOriginal $ttlStatic IN NSEC \000.$qnameOriginal RRSIG NSEC") if $query->header->do;
+	}
+	elsif($qclass eq 'IN') {
+		spew("DEBUG","Query matched IN class") if $debug;
+		if(grep /^$qname$/, keys %$rrNS) {
+			spew("DEBUG", "Query matched an NS") if $debug;
+			$response->{rcode} = 'NOERROR';
+			$response->{header}->{aa} = 1;
+			if($qtype eq 'A') {
+				spew("DEBUG", "Query matched an NS/A") if $debug;
+				push @{$response->{answer}}, Net::DNS::RR->new("$qnameOriginal $ttlStatic $qclass $qtype $rrNS->{$qname}->{A}");
+			}
+			elsif($qtype eq 'AAAA') {
+				spew("DEBUG", "Query matched an NS/AAAA") if $debug;
+				push @{$response->{answer}}, Net::DNS::RR->new("$qnameOriginal $ttlStatic $qclass $qtype $rrNS->{$qname}->{AAAA}");
+			}
+			elsif($qtype eq 'ANY') {
+				spew("DEBUG", "Query matched an NS/ANY") if $debug;
+				push @{$response->{answer}}, Net::DNS::RR->new("$qnameOriginal 2419200 $qclass TXT \"We don't like ANY qtype...\"");
+			}
+			else {
+				spew("DEBUG", "Query matched an NS bad QTYPE") if $debug;
+				push @{$response->{authority}}, Net::DNS::RR->new("$domain. $ttlStatic IN SOA ".rrSOA);
+				push @{$response->{authority}}, Net::DNS::RR->new("$qnameOriginal $ttlStatic IN NSEC \000.$qnameOriginal RRSIG NSEC") if $query->header->do;
+			}
+		}
+		elsif($qname =~ m/^(?:([^\.\s]+)\.)?$domain$/) {
+			spew("DEBUG", "Query matched domain ($qname)") if $debug;
+
+			if((my $id = $1) && $memcache) {
+				spew("ID","Matched ID $id");
+				$memcache->set("ipdns_$id", $peerIp, 30);
+				$memcache->set("ipdns_client_$id", $clientSubnet, 30) if $clientSubnet;
+				$memcache->set("ipdns_edns_size_$id", $ednsSize, 30) if $ednsSize;
+			}
+
+			$response->{rcode} = 'NOERROR';
+			$response->{header}->{aa} = 1;
+			if($qtype eq 'SOA' && $qname eq $domain) {
+				spew("DEBUG", "Query matched domain/SOA") if $debug;
+				push @{$response->{answer}}, Net::DNS::RR->new("$qnameOriginal $ttlStatic $qclass $qtype ".rrSOA)
+			}
+			elsif($qtype eq 'A') {
+				spew("DEBUG", "Query matched domain/A") if $debug;
+				push @{$response->{answer}}, Net::DNS::RR->new("$qnameOriginal $ttlStatic $qclass $qtype $rrA");
+			}
+			elsif($qtype eq 'AAAA') {
+				spew("DEBUG", "Query matched domain/AAAA") if $debug;
+				push @{$response->{answer}}, Net::DNS::RR->new("$qnameOriginal $ttlStatic $qclass $qtype $rrAAAA");
+			}
+			elsif($qtype eq 'NS' && $qname eq $domain) {
+				spew("DEBUG", "Query matched domain/NS") if $debug;
+				for(@rrNS) {
+					push @{$response->{answer}}, Net::DNS::RR->new("$qnameOriginal $ttlStatic $qclass $qtype $_->{name}");
+					push @{$response->{additional}}, Net::DNS::RR->new("$_->{name}. $ttlStatic $qclass A $_->{A}");
+					push @{$response->{additional}}, Net::DNS::RR->new("$_->{name}. $ttlStatic $qclass AAAA $_->{AAAA}");
+				}
+			}
+			elsif($qtype eq 'TXT') {
+				spew("DEBUG", "Query matched domain/TXT") if $debug;
+				push @{$response->{answer}}, Net::DNS::RR->new("$qnameOriginal $ttlDynamic $qclass $qtype \"query source .: $peerIp\"");
+				push @{$response->{answer}}, Net::DNS::RR->new("$qnameOriginal $ttlDynamic $qclass $qtype \"client subnet : $clientSubnet\"") if $clientSubnet;
+				push @{$response->{answer}}, Net::DNS::RR->new("$qnameOriginal $ttlDynamic $qclass $qtype \"edns size ....: $ednsSize\"") if $ednsSize;
+			}
+			elsif($qtype eq 'DNSKEY') {
+				spew("DEBUG", "Query matched domain/DNSKEY") if $debug;
+				push @{$response->{answer}}, Net::DNS::RR->new("$qnameOriginal $ttlStatic $qclass $qtype $rrDNSKEY");
+			}
+			else {
+				spew("DEBUG", "Query unmatched QTYPE") if $debug;
+				push @{$response->{authority}}, Net::DNS::RR->new("$domain. $ttlStatic IN SOA ".rrSOA);
+				push @{$response->{authority}}, Net::DNS::RR->new("$qnameOriginal $ttlStatic IN NSEC \000.$qnameOriginal RRSIG NSEC") if $query->header->do;
+			}
+		}
+		elsif($qname =~ m/^.*\.$domain$/) {
+			$response->{rcode} = 'NXDOMAIN';
+			spew("DEBUG","Unmatched auth QNAME") if $debug;
+			push @{$response->{authority}}, Net::DNS::RR->new("$domain. $ttlStatic IN SOA ".rrSOA);
+			push @{$response->{authority}}, Net::DNS::RR->new("$qnameOriginal $ttlStatic IN NSEC \000.$qnameOriginal RRSIG NSEC") if $query->header->do;
+		}
+		else {
+			$response->{rcode} = 'REFUSED';
+			spew("DEBUG","Unmatched QNAME") if $debug;
+		}
+	}
+	elsif($qclass eq 'CH') {
+		if($qtype eq 'TXT') {
+			if($qname eq 'hostname.bind') {
+				push @{$response->{answer}}, Net::DNS::RR->new(qq{$qnameOriginal 86400 $qclass TXT $chBindHostname});
+			}
+			elsif($qname eq 'version.bind') {
+				push @{$response->{answer}}, Net::DNS::RR->new(qq{$qnameOriginal 86400 $qclass TXT $chBindVersion});
+			}
+			elsif($qname eq 'author.bind') {
+				push @{$response->{answer}}, Net::DNS::RR->new(q{$qnameOriginal 86400 $qclass TXT "Karl Dyson, DNS Engineer, Perl Hacker. hackery@perlbitch.com"});
+			}
+		}
+		elsif($qtype eq 'SOA' && $qname =~ /^(hostname|version|author).bind$/) {
+			push @{$response->{answer}}, Net::DNS::RR->new(qq{$qnameOriginal 86400 $qclass SOA $qnameOriginal hostmaster.$qnameOriginal 0 28800 7200 604800 86400});
+		}
+		elsif($qtype eq 'NS' && $qname =~ /^(hostname|version|author).bind$/) {
+			push @{$response->{answer}}, Net::DNS::RR->new(qq{$qnameOriginal 0 $qclass NS $qnameOriginal});
+		}
+		else {
+			$response->{rcode} = 'REFUSED';
+		}
+
+		if(@{$response->{answer}} > 0) {
+			$response->{rcode} = 'NOERROR';
+			$response->{header}->{aa} = 1;
+			push @{$response->{authority}}, Net::DNS::RR->new(qq{$qnameOriginal 0 $qclass NS $qnameOriginal});
+		} else {
+			$response->{rcode} = 'REFUSED';
+		}
+	}
+	else {
+		spew("FATAL", "I appear to be lost. I'm really terribly sorry about that...");
+	}
+
+	eval {
+		if($query->header->do && $canSign && $response->{rcode} ne 'REFUSED' && $qclass eq 'IN') {
+			spew("RESPONSE", "DO set; attempting to sign response") if $debug;
+			$response->{answer} = signRrSet($response->{answer}) if $response->{answer};
+			$response->{authority} = signRrSet($response->{authority}) if $response->{authority};
+			$response->{additional} = signRrSet($response->{additional}) if $response->{additional};
+		}
+	};
+	if($@) {
+		spew("SIGNER", "PROBLEM: $@");
+	}
+
+	spew("RESPONSE", "$proto :: $peerIp :: $qclass/$qnameOriginal/$qtype :: $response->{rcode}");
+
+	$stats->{total}++;
+	$stats->{proto}->{$proto}++;
+
+	return($response->{rcode}, $response->{answer}, $response->{authority}, $response->{additional}, $response->{header});
+}
+
+# signs an RR set qtype at a time.
+sub signRrSet {
+	my $rrset = shift;
+	die "can't open $ksk\n" unless -r $ksk;
+	spew("SIGNER", "Signing...") if $debug;
+	my $data;
+	for(@$rrset) {
+		spew("SIGNER", "Sorting RR type ".$_->type) if $debug;
+		push @{$data->{$_->type}}, $_;
+	}
+	for(keys %$data) {
+		spew("SIGNER", "Processing $_") if $debug;
+		my $sigrr = create Net::DNS::RR::RRSIG($data->{$_}, $ksk, 'sigin' => time() - 3600, 'sigval' => 2);
+		push @$rrset, $sigrr;
+	}
+	return $rrset;
+}
