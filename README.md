@@ -87,6 +87,11 @@ So, the process works like this:
 * PHP looks in memcache and generates JSON content for AJAX request and returns content including source IP for DNS lookup
 * Browser renders in relevant <DIV>
 
+## TODO
+
+* Make rrA and rrAAAA arrays so we can reply with round-robin style multiple A/AAAA records
+* Make the above return the records in the ANSWER in a random order
+
 ## License / Warranty
 
 This code is Copyright 2017 Karl Dyson.
