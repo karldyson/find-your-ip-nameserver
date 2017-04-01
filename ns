@@ -1,4 +1,4 @@
-#!/opt/local/bin/perl5.24
+#!/usr/bin/env perl
 
 #
 # A nameserver that returns TXT records containing the IP of the source making the query
@@ -78,8 +78,8 @@ my $rname = $config->{rname} || "hostmaster.$domain";
 my $ttlSoaMin = $config->{ttlSoaMin} || $ttlStatic;
 my $memcacheServer = $config->{memcacheServer} || '127.0.0.1';
 my $memcachePort = $config->{memcachePort} || 11211;
-my $chBindHostname = $config->{hostname.bind} || "These aren't the droids you're looking for... Move along...";
-my $chBindVersion = $config->{version.bind} || "Uh, hang on, I'm sure I had that around here somewhere...";
+my $chBindHostname = $config->{bindHostname} || "These aren't the droids you're looking for... Move along...";
+my $chBindVersion = $config->{bindVersion} || "Uh, hang on, I'm sure I had that around here somewhere...";
 ## CONFIG ENDS ##
 
 $SIG{USR1} = sub { spew("STATS", doStats()); };
