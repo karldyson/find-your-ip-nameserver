@@ -44,40 +44,30 @@ No idea. Currently untested. Unlikely to be properly fast.
 The config file is JSON format, look at the supplied example.
 
 * debug : sets the debug level
-  * 0 : off
-  * 1 : on
-  * 2 : verbose
-
+    * 0 : off
+    * 1 : on
+    * 2 : verbose
 * domain : the domain that is delegated to the IP the code is listening on
-
 * ksk : the path to the KSK private key
-
 * rrDNSKEY : the DNSKEY data. No sanity checking is done on format, but won't work unless correctly formatted.
-
 * localAddr : the address we should listen on. defaults to :: (all of any protocol)
-
 * localPort : the port we should listen to. defaults to 53, which of course needs root (<1024)
-
 * logFile : the file to log to. blank for no logging.
-
 * rrNS : an array of hashes of nameservers. name is minimum, A and/or AAAA for in bailiwick / glue
   defaults to ns.$domain with rrA and/or rrAAAA
-
 * mname : the SOA master nameserver name. defaults to the first rrNS entry
-
 * rname : the SOA responsible person contact. defaults to hostmaster.$domain
-
 * ttlStatic : the TTL for static entries (A, AAAA, NS, SOA, DNSKEY). Defaults to 30s.
-
 * ttlDynamic : the TTL for dynamic entries (TXT). Defaults to 5s.
-
 * ttlSoaMin : the SOA Minimum (TTL for negative caching). Defaults to $ttlStatic
+* memcacheServer : the memcache server's IP. Defaults to 127.0.0.1
+* memcachePort : the memcache server's port. Defaults to 11211
 
 ## Notes
 
 ### ANY QTYPE
 
-We don't like ANY queries. So, ANY received via UDP gets NOERROR with TC set. ANY received via TCP gets empty REFUSED.
+We don't like ANY queries. So, ANY received via UDP gets NOERROR with TC set. ANY received via TCP gets REFUSED.
 
 ## Find Your IP Webserver
 
