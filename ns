@@ -57,6 +57,8 @@ my $ksk = $config->{ksk};
 my $domain = $config->{domain} || die "No domain supplied in config file\n";
 my $rrA = $config->{rrA};
 my $rrAAAA = $config->{rrAAAA};
+my $qnameOnlyA = $config->{qnameOnlyA} || "4.$domain";
+my $qnameOnlyAAAA = $config->{qnameOnlyAAAA} || "6.$domain";
 die "You need at least one of rrA or rrAAAA set\n" unless $rrA or $rrAAAA;
 my @rrNS;
 if(defined($config->{rrNS})) {
@@ -101,6 +103,8 @@ spew("STARTUP", "logFile ........ :: $logFile");
 spew("STARTUP", "Domain ......... :: $domain");
 spew("STARTUP", "A .............. :: $rrA");
 spew("STARTUP", "AAAA ........... :: $rrAAAA");
+spew("STARTUP", "QNAME Only A ... :: $qnameOnlyA");
+spew("STARTUP", "QNAME Only AAAA  :: $qnameOnlyAAAA");
 spew("STARTUP", "TTL Static ..... :: $ttlStatic");
 spew("STARTUP", "TTL Dynamic .... :: $ttlDynamic");
 spew("STARTUP", "SOA MNAME ...... :: $mname");
@@ -314,7 +318,7 @@ sub responseHandler {
 		elsif($qname =~ m/^(?:([^\.\s]+)\.)?$domain$/) {
 			spew("DEBUG", "Query matched domain ($qname)") if $debug;
 
-			if((my $id = $1) && $memcache) {
+			if((my $id = $1) && $memcache && $qname !~ m/^($qnameOnlyA|$qnameOnlyAAAA)$/) {
 				spew("ID","Matched ID $id");
 				$memcache->set("ipdns_$id", $peerIp, 30);
 				$memcache->set("ipdns_client_$id", $clientSubnet, 30) if $clientSubnet;
@@ -327,11 +331,11 @@ sub responseHandler {
 				spew("DEBUG", "Query matched domain/SOA") if $debug;
 				push @{$response->{answer}}, Net::DNS::RR->new("$qnameOriginal $ttlStatic $qclass $qtype ".rrSOA)
 			}
-			elsif($qtype eq 'A') {
+			elsif($qtype eq 'A' && $qname ne $qnameOnlyAAAA) {
 				spew("DEBUG", "Query matched domain/A") if $debug;
 				push @{$response->{answer}}, Net::DNS::RR->new("$qnameOriginal $ttlStatic $qclass $qtype $rrA");
 			}
-			elsif($qtype eq 'AAAA') {
+			elsif($qtype eq 'AAAA' && $qname ne $qnameOnlyA) {
 				spew("DEBUG", "Query matched domain/AAAA") if $debug;
 				push @{$response->{answer}}, Net::DNS::RR->new("$qnameOriginal $ttlStatic $qclass $qtype $rrAAAA");
 			}
@@ -349,7 +353,7 @@ sub responseHandler {
 				push @{$response->{answer}}, Net::DNS::RR->new("$qnameOriginal $ttlDynamic $qclass $qtype \"client subnet : $clientSubnet\"") if $clientSubnet;
 				push @{$response->{answer}}, Net::DNS::RR->new("$qnameOriginal $ttlDynamic $qclass $qtype \"edns size ....: $ednsSize\"") if $ednsSize;
 			}
-			elsif($qtype eq 'DNSKEY') {
+			elsif($qtype eq 'DNSKEY' && $qname eq $domain) {
 				spew("DEBUG", "Query matched domain/DNSKEY") if $debug;
 				push @{$response->{answer}}, Net::DNS::RR->new("$qnameOriginal $ttlStatic $qclass $qtype $rrDNSKEY");
 			}
