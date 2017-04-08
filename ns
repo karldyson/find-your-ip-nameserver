@@ -215,11 +215,11 @@ sub commify($;$$) {
 
 # makes an ipv6 address human readable (hah) from CLIENT-SUBNET
 sub colonify {
-  my $text = shift;
-  $text =~ s/([\da-f]{4})(?=[\da-f])(?![\da-f]*\.)/$1:/g;
-  $text =~ s/:0000//g;
-  $text =~ s/:0+/:/g;
-  return $text;
+	my $text = shift;
+	$text =~ s/([\da-f]{4})(?=[\da-f])(?![\da-f]*\.)/$1:/g;
+	$text =~ s/:0000//g;
+	$text =~ s/:0+/:/g;
+	return $text;
 }
 
 # the actual response handler
