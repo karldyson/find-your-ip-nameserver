@@ -41,9 +41,9 @@ my $configFile = shift || '/usr/local/etc/ns.conf';
 my $config;
 local $/;
 if(open(C, $configFile)) {
-        my $json = <C>;
-        close C;
-        $config = decode_json($json);
+	my $json = <C>;
+	close C;
+	$config = decode_json($json);
 } else {
 	die "cannot open config file: $!\n";
 }
@@ -180,9 +180,9 @@ sub rrSOA {
 
 # chucks out the current stats
 sub doStats {
-  my $ret = "Startup: $stats->{start} (".localtime($stats->{start})."); Uptime: ".commify((time() - $stats->{start}))."; ";
-  $ret .= "Connections: Total:$stats->{total}; TCP:$stats->{proto}->{tcp}; UDP:$stats->{proto}->{udp}";
-  return $ret;
+	my $ret = "Startup: $stats->{start} (".localtime($stats->{start})."); Uptime: ".commify((time() - $stats->{start}))."; ";
+	$ret .= "Connections: Total:$stats->{total}; TCP:$stats->{proto}->{tcp}; UDP:$stats->{proto}->{udp}";
+	return $ret;
 }
 
 # spews stuff to the screen and logfile for debugging etc.
@@ -249,20 +249,19 @@ sub responseHandler {
 		my $sourceLength = sprintf "%d", hex("0x$options[4]$options[5]");
 		my $scopeLength = sprintf "%d", hex("0x$options[6]$options[7]");
 		if($family == 1) {
-    	my @address = ($address =~ m/^([a-f\d]{2})([a-f\d]{2})?([a-f\d]{2})?([a-f\d]{2})?$/);
-      for my $i (0..$#address) {
-        $address[$i] = sprintf "%d", hex("0x$address[$i]");
-      }
-      $clientSubnet = join(".", @address)."/$sourceLength/$scopeLength";
-    }
-    elsif($family == 2) {
-      $clientSubnet = colonify($address)."::/$sourceLength/$scopeLength";
-    }
-
+			my @address = ($address =~ m/^([a-f\d]{2})([a-f\d]{2})?([a-f\d]{2})?([a-f\d]{2})?$/);
+			for my $i (0..$#address) {
+				$address[$i] = sprintf "%d", hex("0x$address[$i]");
+			}
+			$clientSubnet = join(".", @address)."/$sourceLength/$scopeLength";
+		}
+		elsif($family == 2) {
+			$clientSubnet = colonify($address)."::/$sourceLength/$scopeLength";
+		}
 		$ednsSize = $query->edns->size;
 	}
 
-## START BUILDING RESPONSE ##
+	## START BUILDING RESPONSE ##
 
 	my $response = {
 		'answer' => [],
